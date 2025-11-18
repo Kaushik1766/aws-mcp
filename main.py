@@ -23,6 +23,7 @@ load_dotenv()
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_PROMPT = "Give me cost report for last month"
+EXIT_COMMANDS = {"exit", "quit", ":q"}
 
 
 def _clean_schema(schema: Any) -> Any:
@@ -169,8 +170,74 @@ async def _invoke_tool(
     )
 
 
+async def _run_chat_turn(
+    session: ClientSession,
+    client: genai.Client,
+    conversation: list[genai_types.Content],
+    gemini_tools: Sequence[Tool],
+    model: str,
+) -> str:
+    response = _generate(client, conversation, gemini_tools, model)
+
+    while True:
+        if not response.candidates:
+            raise RuntimeError("Gemini returned no candidates")
+
+        candidate = response.candidates[0]
+        function_calls = _candidate_function_calls(candidate)
+
+        if not function_calls:
+            assistant_text = _render_candidate_text(candidate)
+            parts = candidate.content.parts if candidate.content and candidate.content.parts else []
+            if parts:
+                conversation.append(genai_types.Content(role="model", parts=parts))
+            else:
+                conversation.append(
+                    genai_types.Content(
+                        role="model", parts=[genai_types.Part.from_text(text=assistant_text)]
+                    )
+                )
+            return assistant_text
+
+        if candidate.content and candidate.content.parts:
+            conversation.append(genai_types.Content(role="model", parts=candidate.content.parts))
+
+        for call in function_calls:
+            tool_part = await _invoke_tool(session, call)
+            conversation.append(genai_types.Content(role="user", parts=[tool_part]))
+
+        response = _generate(client, conversation, gemini_tools, model)
+
+
 async def query_aws_cost(prompt: str) -> str:
     """Query Gemini for AWS cost insights, fulfilling tool calls via MCP."""
+
+    server_params = _build_server_params()
+    client = _build_gemini_client()
+    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+    async with stdio_client(server_params) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            await session.initialize()
+            tools_response = await session.list_tools()
+            gemini_tools = convert_mcp_tools_to_gemini(tools_response.tools)
+
+            if not gemini_tools:
+                raise RuntimeError("No MCP tools available to expose to Gemini")
+
+            conversation: list[genai_types.Content] = [
+                genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=prompt)])
+            ]
+
+            return await _run_chat_turn(session, client, conversation, gemini_tools, model)
+
+
+async def _read_user_input(prompt: str) -> str:
+    return await asyncio.to_thread(input, prompt)
+
+
+async def interactive_chat(initial_prompt: str | None = None) -> None:
+    """Start an interactive multi-turn chat with Gemini and MCP."""
 
     server_params = _build_server_params()
     client = _build_gemini_client()
@@ -182,35 +249,60 @@ async def query_aws_cost(prompt: str) -> str:
             tools_response = await session.list_tools()
             gemini_tools = convert_mcp_tools_to_gemini(tools_response.tools)
 
-            conversation: list[genai_types.Content] = [
-                genai_types.Content(role="user", parts=[genai_types.Part.from_text(text=prompt)])
-            ]
-
             if not gemini_tools:
                 raise RuntimeError("No MCP tools available to expose to Gemini")
 
-            response = _generate(client, conversation, gemini_tools, model)
+            conversation: list[genai_types.Content] = []
+            print("Starting interactive AWS cost chat. Type 'exit' to leave.")
+
+            if initial_prompt:
+                print(f"You: {initial_prompt}")
+                conversation.append(
+                    genai_types.Content(
+                        role="user", parts=[genai_types.Part.from_text(text=initial_prompt)]
+                    )
+                )
+                try:
+                    assistant_text = await _run_chat_turn(
+                        session, client, conversation, gemini_tools, model
+                    )
+                except Exception as exc:  # pragma: no cover - interactive guardrail
+                    LOGGER.exception("Error handling initial prompt")
+                    print(f"[ERROR] {exc}")
+                else:
+                    if assistant_text:
+                        print(f"Assistant: {assistant_text}")
 
             while True:
-                if not response.candidates:
-                    raise RuntimeError("Gemini returned no candidates")
+                try:
+                    user_input = (await _read_user_input("You: ")).strip()
+                except EOFError:
+                    print()
+                    break
 
-                candidate = response.candidates[0]
-                function_calls = _candidate_function_calls(candidate)
+                if not user_input:
+                    continue
 
-                if not function_calls:
-                    return _render_candidate_text(candidate)
+                if user_input.lower() in EXIT_COMMANDS:
+                    break
 
-                if candidate.content:
-                    conversation.append(
-                        genai_types.Content(role="assistant", parts=candidate.content.parts)
+                conversation.append(
+                    genai_types.Content(
+                        role="user", parts=[genai_types.Part.from_text(text=user_input)]
                     )
+                )
 
-                for call in function_calls:
-                    tool_part = await _invoke_tool(session, call)
-                    conversation.append(genai_types.Content(role="tool", parts=[tool_part]))
+                try:
+                    assistant_text = await _run_chat_turn(
+                        session, client, conversation, gemini_tools, model
+                    )
+                except Exception as exc:  # pragma: no cover - interactive guardrail
+                    LOGGER.exception("Error during chat turn")
+                    print(f"[ERROR] {exc}")
+                    continue
 
-                response = _generate(client, conversation, gemini_tools, model)
+                if assistant_text:
+                    print(f"Assistant: {assistant_text}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -218,7 +310,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         "-p",
-        default=DEFAULT_PROMPT,
+        default=None,
         help="Question to ask Gemini (defaults to last month's cost report)",
     )
     parser.add_argument(
@@ -226,18 +318,32 @@ def _parse_args() -> argparse.Namespace:
         default=os.getenv("LOG_LEVEL", "INFO"),
         help="Logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Start an interactive chat session after the first response",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    prompt = args.prompt or DEFAULT_PROMPT
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="[%(levelname)s] %(message)s",
     )
 
+    if args.interactive:
+        try:
+            asyncio.run(interactive_chat(initial_prompt=args.prompt))
+        except KeyboardInterrupt:
+            LOGGER.info("Cancelled by user")
+        return
+
     try:
-        result = asyncio.run(query_aws_cost(args.prompt))
+        result = asyncio.run(query_aws_cost(prompt))
     except KeyboardInterrupt:
         LOGGER.info("Cancelled by user")
         return
