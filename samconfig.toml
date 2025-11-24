@@ -1,0 +1,12 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "aws-agent"
+resolve_s3 = true
+s3_prefix = "aws-agent"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+image_repositories = []
+
+[default.global.parameters]
+region = "ap-south-1"

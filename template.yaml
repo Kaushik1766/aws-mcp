@@ -1,0 +1,43 @@
+#Required
+Transform: AWS::Serverless-2016-10-31
+#Optional
+Description: aws cost agent template
+#Optional
+Resources:
+  lambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: aws-agent-execution-role
+      Policies:
+        - PolicyName: aws-cost-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ce:*
+                Resource: "*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+  agentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lambda
+      Handler: main.handler
+      Runtime: python3.13
+      Role: !GetAtt lambdaRole.Arn
+      Timeout: 900
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Method: POST
+            Path: /chat

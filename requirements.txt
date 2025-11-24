@@ -1,0 +1,3 @@
+strands_agents
+strands-agents-tools
+aws_lambda_typing
