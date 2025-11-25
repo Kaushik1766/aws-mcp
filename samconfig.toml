@@ -5,8 +5,8 @@ stack_name = "aws-agent"
 resolve_s3 = true
 s3_prefix = "aws-agent"
 confirm_changeset = false
-capabilities = "CAPABILITY_IAM"
-image_repositories = []
+capabilities = "CAPABILITY_NAMED_IAM"
+image_repositories = ["FastAPIFunction=513758042129.dkr.ecr.ap-south-1.amazonaws.com/awsagent864c6fa7/fastapifunctionead79d0drepo"]
 
 [default.global.parameters]
 region = "ap-south-1"

@@ -27,17 +27,38 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
 
-  agentFunction:
+  # agentFunction:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     CodeUri: lambda
+  #     Handler: main.handler
+  #     Runtime: python3.13
+  #     Role: !GetAtt lambdaRole.Arn
+  #     Timeout: 900
+  #     # FunctionUrlConfig:
+  #     #   AuthType: NONE
+  #     #   InvokeMode: RESPONSE_STREAM
+  #     Events:
+  #       ApiEvent:
+  #         Type: Api
+  #         Properties:
+  #           Method: POST
+  #           Path: /chat
+  FastAPIFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: lambda
-      Handler: main.handler
-      Runtime: python3.13
-      Role: !GetAtt lambdaRole.Arn
+      PackageType: Image
       Timeout: 900
-      Events:
-        ApiEvent:
-          Type: Api
-          Properties:
-            Method: POST
-            Path: /chat
+      MemorySize: 512
+      Environment:
+        Variables:
+          AWS_LWA_INVOKE_MODE: RESPONSE_STREAM
+      FunctionUrlConfig:
+        AuthType: NONE
+        InvokeMode: RESPONSE_STREAM
+      Role: !GetAtt lambdaRole.Arn
+      Tracing: Active
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: ./lambda
+      DockerTag: v1
